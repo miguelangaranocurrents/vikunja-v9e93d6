@@ -3,7 +3,7 @@ import {nextTick, toValue, type MaybeRefOrGetter, type Ref} from 'vue'
 import StarterKit from '@tiptap/starter-kit'
 import {createNodeFromContent, Extension, mergeAttributes, type Editor, type Extensions} from '@tiptap/core'
 import {Plugin, PluginKey} from '@tiptap/pm/state'
-import {Fragment} from '@tiptap/pm/model'
+import {Fragment, type Node, type Slice} from '@tiptap/pm/model'
 import {marked} from 'marked'
 
 import Link from '@tiptap/extension-link'
@@ -78,6 +78,69 @@ export interface EditorExtensionDeps {
 	getEditor: () => Editor | undefined
 	uploadCallback: MaybeRefOrGetter<UploadCallback | undefined>
 	uploadAndInsertFiles: (files: File[] | FileList) => void
+}
+
+function serializeClipboardNode(node: Node, prefix: string): string[] {
+	if (node.isText) {
+		return [prefix + (node.text ?? '')]
+	}
+
+	if (node.type.name === 'bulletList' || node.type.name === 'orderedList' || node.type.name === 'taskList') {
+		const lines: string[] = []
+		let index = 1
+		node.forEach(child => {
+			let marker = '- '
+			if (node.type.name === 'orderedList') {
+				marker = `${index}. `
+			} else if (node.type.name === 'taskList') {
+				marker = child.attrs.checked ? '[x] ' : '[ ] '
+			}
+			lines.push(...serializeClipboardNode(child, prefix + marker))
+			index++
+		})
+		return lines
+	}
+
+	if (node.childCount === 0) {
+		return [prefix]
+	}
+
+	if (node.firstChild?.isBlock) {
+		const lines: string[] = []
+		let isFirst = true
+		node.forEach(child => {
+			lines.push(...serializeClipboardNode(child, isFirst ? prefix : ''))
+			isFirst = false
+		})
+		return lines
+	}
+
+	let line = prefix
+	node.forEach(child => {
+		if (child.isText) {
+			line += child.text ?? ''
+		} else if (child.type.name === 'hardBreak') {
+			line += '\n'
+		} else {
+			line += child.textContent
+		}
+	})
+	return [line]
+}
+
+// The textBetween fallback emits a separator per nesting level and no list markers, breaking copied lists.
+function clipboardTextSerializer(slice: Slice): string {
+	const lines: string[] = []
+	slice.content.forEach(node => {
+		let prefix = ''
+		if (node.type.name === 'listItem') {
+			prefix = '- '
+		} else if (node.type.name === 'taskItem') {
+			prefix = node.attrs.checked ? '[x] ' : '[ ] '
+		}
+		lines.push(...serializeClipboardNode(node, prefix))
+	})
+	return lines.join('\n')
 }
 
 // the value lands in a style attribute, anything beyond a plain color allows CSS injection
@@ -232,6 +295,7 @@ export function createEditorExtensions(deps: EditorExtensionDeps): Extensions {
 					key: new PluginKey('pasteHandler'),
 					props: {
 						clipboardParser: createClipboardParser(this.editor.schema),
+						clipboardTextSerializer,
 						transformPasted: slice => repairSliceContent(slice),
 
 						handlePaste: (view, event) => {
